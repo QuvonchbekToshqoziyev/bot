@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackQueryHandler
 from telegram.ext import ContextTypes
 
 from app.core.permissions import Permission, PermissionDenied
@@ -9,14 +10,31 @@ from app.core.router import CommandRouter
 from app.core.skill_registry import SkillRegistry
 from app.ai.orchestrator import AIOrchestrator
 from app.storage.repositories import AIConfigurationRepository
+from app.storage.repositories import SkillConfigurationRepository
 
 
-def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None):
+def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None):
+    def menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("What can you do?", callback_data="menu:capabilities"), InlineKeyboardButton("Skills", callback_data="menu:skills")],
+            [InlineKeyboardButton("Ask a question/task", callback_data="menu:ask"), InlineKeyboardButton("Manage chat", callback_data="menu:management")],
+            [InlineKeyboardButton("AI settings", callback_data="menu:ai")],
+        ])
+
+    async def ensure_help(user_id: int, chat_id: int) -> None:
+        if configurations is not None:
+            await asyncio.to_thread(configurations.set_enabled, user_id, chat_id, "help", True)
+
+    async def menu_text(update: Update, text: str) -> None:
+        await update.effective_message.reply_text(text, reply_markup=menu())
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text("Telegram Workspace Manager is running. Use /help.")
+        await ensure_help(update.effective_user.id, update.effective_chat.id)
+        await menu_text(update, "Telegram Workspace Manager\nChoose an option:")
 
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text("/skills\n/skill enable <name>\n/skill disable <name>\n/status\n/ask <task>\n/ai enable|disable|status")
+        await ensure_help(update.effective_user.id, update.effective_chat.id)
+        await menu_text(update, "Choose an option:")
 
     async def skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id, chat_id = update.effective_user.id, update.effective_chat.id
@@ -70,4 +88,51 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         except PermissionDenied as exc:
             await update.effective_message.reply_text(str(exc))
 
-    return start, help_command, skills, skill_command, status, ask, ai_command
+    async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        await ensure_help(query.from_user.id, query.message.chat_id)
+        action = query.data or "menu:back"
+        if action == "menu:back":
+            await query.edit_message_text("Choose an option:", reply_markup=menu())
+        elif action == "menu:capabilities":
+            result = await registry.execute(query.from_user.id, query.message.chat_id, "help", "answer_question", {"question": "What can you do?"})
+            await query.edit_message_text(result["answer"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+        elif action == "menu:skills":
+            items = registry.metadata(query.from_user.id, query.message.chat_id)
+            text = "Skills in this chat:\n" + "\n".join(f"• {item['name']}: {'enabled' if item['enabled'] else 'disabled'}" for item in items)
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+        elif action == "menu:ask":
+            context.user_data["awaiting_task"] = True
+            await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
+        elif action == "menu:management":
+            await query.edit_message_text("I can inspect chats, list administrators, send, delete, and pin messages. Add me as a Telegram administrator in the target group or channel, then choose Ask a question/task and describe what you want.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Ask a task", callback_data="menu:ask"), InlineKeyboardButton("Back", callback_data="menu:back")]]))
+        elif action == "menu:ai":
+            enabled = ai is not None and ai_configuration is not None and ai_configuration.is_enabled(query.message.chat_id)
+            await query.edit_message_text(f"AI is {'enabled' if enabled else 'disabled'}.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Enable", callback_data="ai:enable"), InlineKeyboardButton("Disable", callback_data="ai:disable")], [InlineKeyboardButton("Back", callback_data="menu:back")]]))
+        elif action in {"ai:enable", "ai:disable"}:
+            if ai is None or ai_configuration is None:
+                await query.edit_message_text("AI is not configured on this server.", reply_markup=menu())
+                return
+            try:
+                router.registry.permissions.require_user(query.from_user.id, query.message.chat_id, frozenset({Permission.MANAGE_SKILLS}))
+                enabled = action == "ai:enable"
+                await asyncio.to_thread(ai_configuration.set_enabled, query.message.chat_id, enabled)
+                await query.edit_message_text(f"AI {'enabled' if enabled else 'disabled'}.", reply_markup=menu())
+            except PermissionDenied as exc:
+                await query.edit_message_text(str(exc), reply_markup=menu())
+
+    async def turn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await ensure_help(update.effective_user.id, update.effective_chat.id)
+        if not context.user_data.pop("awaiting_task", False):
+            if update.effective_chat.type == "private":
+                result = await registry.execute(update.effective_user.id, update.effective_chat.id, "help", "answer_question", {"question": update.effective_message.text})
+                await update.effective_message.reply_text(result["answer"], reply_markup=menu())
+            return
+        if ai is None or ai_configuration is None or not ai_configuration.is_enabled(update.effective_chat.id):
+            await update.effective_message.reply_text("AI is disabled. Use the AI settings button first.", reply_markup=menu())
+            return
+        result = await ai.handle_task(update.effective_user.id, update.effective_chat.id, update.effective_message.text)
+        await update.effective_message.reply_text(result.message, reply_markup=menu())
+
+    return start, help_command, skills, skill_command, status, ask, ai_command, callback, turn

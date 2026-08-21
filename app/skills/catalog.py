@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.skill_registry import Skill
 from app.skills.library import LibrarySkill
+from app.skills.help import HelpSkill
 from app.skills.management import ManagementSkill, ChatManagementAdapter
 from app.skills.statistics import StatisticsSkill
 from app.storage.repositories import LibraryRepository
