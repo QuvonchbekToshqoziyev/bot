@@ -9,6 +9,7 @@ from app.core.permissions import PermissionDenied, PermissionService
 from app.core.router import CommandRouter
 from app.core.skill_registry import SkillRegistry
 from app.skills.library import LibrarySkill
+from app.skills.management import ManagementSkill
 from app.skills.statistics import StatisticsSkill
 from app.storage.database import Database
 from app.storage.repositories import AuthorizationRepository, LibraryRepository, SkillConfigurationRepository, WorkspaceRepository
@@ -96,6 +97,50 @@ def test_tool_input_validation():
     registry.enable(1, 2, "statistics")
     with pytest.raises(ValueError):
         asyncio.run(registry.execute(1, 2, "statistics", "get_stats", {"unexpected": True}))
+
+
+class FakeManagementAdapter:
+    def __init__(self):
+        self.sent = []
+
+    async def get_chat(self, chat_id):
+        return {"id": chat_id}
+
+    async def get_member_count(self, chat_id):
+        return 3
+
+    async def list_administrators(self, chat_id):
+        return []
+
+    async def send_message(self, chat_id, text):
+        self.sent.append((chat_id, text))
+        return {"chat_id": chat_id, "text": text}
+
+    async def delete_message(self, chat_id, message_id):
+        return True
+
+    async def pin_message(self, chat_id, message_id, disable_notification):
+        return True
+
+
+def test_management_skill_rechecks_permissions_for_target_chat():
+    db = Database("sqlite:///:memory:")
+    configs = SkillConfigurationRepository(db)
+    authorization = AuthorizationRepository(db)
+    authorization.grant_role(1, 10, "admin")
+    authorization.grant_role(1, 99, "admin")
+    permissions = PermissionService(authorization.permissions_for)
+    adapter = FakeManagementAdapter()
+    registry = SkillRegistry(permissions)
+    registry.attach_enablement_store(configs)
+    registry.register(ManagementSkill(adapter, permissions))
+    registry.enable(1, 10, "management")
+    result = asyncio.run(registry.execute(1, 10, "management", "send_message", {"chat_id": 99, "text": "hello"}))
+    assert result == {"chat_id": 99, "text": "hello"}
+    assert adapter.sent == [(99, "hello")]
+    authorization.grant_role(2, 10, "member")
+    with pytest.raises(PermissionDenied):
+        asyncio.run(registry.execute(2, 10, "management", "send_message", {"chat_id": 99, "text": "blocked"}))
 
 
 class FakeResponse:

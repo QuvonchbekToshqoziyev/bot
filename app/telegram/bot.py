@@ -14,14 +14,16 @@ from app.skills.catalog import discover_skills
 from app.storage.database import Database
 from app.storage.repositories import AIConfigurationRepository, AuthorizationRepository, LibraryRepository, SkillConfigurationRepository
 from app.telegram.handlers import build_handlers
+from app.telegram.management_adapter import TelegramManagementAdapter
 
 
 def create_application(settings: Settings) -> Application:
     database = Database(settings.database_url)
+    application = Application.builder().token(settings.telegram_bot_token).build()
     authorization = AuthorizationRepository(database)
     registry = SkillRegistry(PermissionService(authorization.permissions_for, settings.admin_user_ids))
     library_repository = LibraryRepository(database)
-    for skill in discover_skills(library_repository):
+    for skill in discover_skills(library_repository, TelegramManagementAdapter(application.bot), registry.permissions):
         registry.register(skill)
     configurations = SkillConfigurationRepository(database)
     registry.attach_enablement_store(configurations)
@@ -36,7 +38,6 @@ def create_application(settings: Settings) -> Application:
             ai = AIOrchestrator(registry, AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url), settings.openai_model)
     ai_configuration = AIConfigurationRepository(database)
     start, help_command, skills, skill_command, status, ask, ai_command = build_handlers(router, registry, ai, ai_configuration)
-    application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("skills", skills))
