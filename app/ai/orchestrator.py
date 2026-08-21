@@ -44,7 +44,7 @@ class AIOrchestrator:
             selection = await self._select_skills(task, available)
         except Exception:
             logger.exception("AI skill selection failed")
-            return AIResult("failed", "AI is temporarily unavailable. Check the AI provider balance or configuration.")
+            return await self._fallback(user_id, chat_id, task, available)
         selected = tuple(name for name in selection if name in by_skill)
         if not selected:
             return AIResult("not_found", "No enabled skill matches this task.")
@@ -62,7 +62,7 @@ class AIOrchestrator:
             )
         except Exception:
             logger.exception("AI tool execution request failed")
-            return AIResult("failed", "AI is temporarily unavailable. Check the AI provider balance or configuration.", selected)
+            return await self._fallback(user_id, chat_id, task, tools, selected)
         for _ in range(self.max_tool_rounds):
             calls = [item for item in getattr(response, "output", ()) if self._type(item) == "function_call"]
             if not calls:
@@ -92,8 +92,27 @@ class AIOrchestrator:
                 )
             except Exception:
                 logger.exception("AI tool continuation failed")
-                return AIResult("failed", "AI is temporarily unavailable. Check the AI provider balance or configuration.", selected)
+                return await self._fallback(user_id, chat_id, task, tools, selected)
         return AIResult("failed", "The AI task exceeded the tool-call limit.", selected)
+
+    async def _fallback(self, user_id: int, chat_id: int, task: str, available: list[dict[str, Any]], selected: tuple[str, ...] = ()) -> AIResult:
+        """Handle safe, no-argument read requests without spending provider credits."""
+        query = task.lower()
+        if any(term in query for term in ("what can", "capabilit", "do you do", "help")):
+            candidates = [item for item in available if item["skill"] == "help" and item["name"] == "answer_question"]
+            if candidates:
+                result = await self.registry.execute(user_id, chat_id, "help", "answer_question", {"question": task})
+                return AIResult("completed", result["answer"], ("help",))
+        words = {word.strip(".,?!:;\"'") for word in query.split()}
+        for item in available:
+            required = item["input_schema"].get("required", [])
+            if required:
+                continue
+            haystack = f"{item['skill']} {item['name']} {item['description']}".lower()
+            if words & set(haystack.replace("_", " ").split()):
+                result = await self.registry.execute(user_id, chat_id, item["skill"], item["name"], {})
+                return AIResult("completed", json.dumps(result, indent=2, default=str), (item["skill"],))
+        return AIResult("failed", "AI is unavailable because the provider has insufficient credits, and this task needs a language model. Add provider credits or try a basic capability/statistics request.", selected)
 
     async def _select_skills(self, task: str, available: list[dict[str, Any]]) -> tuple[str, ...]:
         catalog: dict[str, dict[str, Any]] = {}

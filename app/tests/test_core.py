@@ -165,6 +165,15 @@ class FakeClient:
         self.responses = FakeResponses(responses)
 
 
+class FailingResponses:
+    async def create(self, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+
+class FailingClient:
+    responses = FailingResponses()
+
+
 def test_ai_reports_no_matching_enabled_skill():
     _, _, _, registry = make_registry(frozenset({1}))
     client = FakeClient([FakeResponse([{"type": "function_call", "name": "select_skills", "arguments": '{"skills": []}', "call_id": "c1"}])])
@@ -189,3 +198,11 @@ def test_ai_exposes_and_executes_only_selected_enabled_skill():
     execution_tools = client.responses.calls[1]["tools"]
     assert [tool["name"] for tool in execution_tools] == ["library__list_indexed_messages"]
     assert "statistics__get_stats" not in str(execution_tools)
+
+
+def test_ai_falls_back_to_safe_basic_tool_when_provider_is_unavailable():
+    _, _, _, registry = make_registry(frozenset({1}))
+    registry.enable(1, 2, "statistics")
+    result = asyncio.run(AIOrchestrator(registry, FailingClient()).handle_task(1, 2, "statistics"))
+    assert result.status == "completed"
+    assert '"indexed_messages": 0' in result.message
