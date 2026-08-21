@@ -20,9 +20,9 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
     local_tasks = LocalTaskRouter(registry)
     def menu() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("What can you do?", callback_data="menu:capabilities"), InlineKeyboardButton("Skills", callback_data="menu:skills")],
-            [InlineKeyboardButton("Local task", callback_data="menu:local")],
-            [InlineKeyboardButton("Ask a question/task", callback_data="menu:ask"), InlineKeyboardButton("Manage chat", callback_data="menu:management")],
+            [InlineKeyboardButton("Overview", callback_data="menu:overview"), InlineKeyboardButton("What can you do?", callback_data="menu:capabilities")],
+            [InlineKeyboardButton("Skills", callback_data="menu:skills"), InlineKeyboardButton("Statistics", callback_data="menu:statistics")],
+            [InlineKeyboardButton("Library", callback_data="menu:library"), InlineKeyboardButton("Manage chat", callback_data="menu:management")],
             [InlineKeyboardButton("AI settings", callback_data="menu:ai")],
         ])
 
@@ -53,6 +53,13 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
     async def ensure_help(user_id: int, chat_id: int) -> None:
         if configurations is not None:
             await asyncio.to_thread(configurations.set_enabled, user_id, chat_id, "help", True)
+
+    async def ensure_skill(user_id: int, chat_id: int, name: str) -> bool:
+        try:
+            await asyncio.to_thread(router.enable, user_id, chat_id, name)
+            return True
+        except (PermissionDenied, PermissionError):
+            return False
 
     async def menu_text(update: Update, text: str) -> None:
         await update.effective_message.reply_text(text, reply_markup=menu())
@@ -140,9 +147,24 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         elif action == "menu:ask":
             context.user_data["awaiting_task"] = True
             await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
-        elif action == "menu:local":
-            context.user_data["awaiting_task"] = True
-            await query.edit_message_text("Send a local task such as ‘statistics’, ‘list skills’, or ‘what can you do?’. No AI will be used.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
+        elif action == "menu:overview":
+            if not await ensure_skill(query.from_user.id, query.message.chat_id, "workspace"):
+                await query.edit_message_text("Overview is not authorized in this chat.", reply_markup=menu())
+                return
+            result = await registry.execute(query.from_user.id, query.message.chat_id, "workspace", "get_overview", {})
+            await query.edit_message_text(json.dumps(result, indent=2), reply_markup=menu())
+        elif action == "menu:statistics":
+            if not await ensure_skill(query.from_user.id, query.message.chat_id, "statistics"):
+                await query.edit_message_text("Statistics is not authorized in this chat.", reply_markup=menu())
+                return
+            result = await registry.execute(query.from_user.id, query.message.chat_id, "statistics", "get_stats", {})
+            await query.edit_message_text(json.dumps(result, indent=2), reply_markup=menu())
+        elif action == "menu:library":
+            if not await ensure_skill(query.from_user.id, query.message.chat_id, "library"):
+                await query.edit_message_text("Library is not authorized in this chat.", reply_markup=menu())
+                return
+            result = await registry.execute(query.from_user.id, query.message.chat_id, "library", "list_indexed_messages", {})
+            await query.edit_message_text(json.dumps(result, indent=2)[:3900], reply_markup=menu())
         elif action == "menu:management":
             try:
                 await asyncio.to_thread(router.enable, query.from_user.id, query.message.chat_id, "management")

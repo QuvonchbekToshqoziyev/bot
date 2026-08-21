@@ -11,6 +11,7 @@ from app.core.router import CommandRouter
 from app.core.skill_registry import SkillRegistry
 from app.skills.library import LibrarySkill
 from app.skills.management import ManagementSkill
+from app.skills.workspace import WorkspaceSkill
 from app.skills.statistics import StatisticsSkill
 from app.storage.database import Database
 from app.storage.repositories import AuthorizationRepository, LibraryRepository, SkillConfigurationRepository, WorkspaceRepository
@@ -216,3 +217,12 @@ def test_local_task_router_handles_statistics_without_ai():
     assert result.handled is True
     assert result.skill == "statistics"
     assert "indexed_messages" in result.message
+
+
+def test_workspace_skill_reports_enabled_skills():
+    _, _, _, registry = make_registry(frozenset({1}))
+    registry.register(WorkspaceSkill(registry.metadata))
+    registry.enable(1, 2, "workspace")
+    result = asyncio.run(registry.execute(1, 2, "workspace", "get_overview", {}))
+    assert result["status"] == "online"
+    assert "workspace" in result["enabled_skills"]

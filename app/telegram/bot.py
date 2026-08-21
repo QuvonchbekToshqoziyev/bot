@@ -12,6 +12,7 @@ from app.core.skill_registry import SkillRegistry
 from app.ai.orchestrator import AIOrchestrator
 from app.skills.catalog import discover_skills
 from app.skills.help import HelpSkill
+from app.skills.workspace import WorkspaceSkill
 from app.storage.database import Database
 from app.storage.repositories import AIConfigurationRepository, AuthorizationRepository, LibraryRepository, SkillConfigurationRepository
 from app.telegram.handlers import build_handlers
@@ -27,6 +28,7 @@ def create_application(settings: Settings) -> Application:
     for skill in discover_skills(library_repository, TelegramManagementAdapter(application.bot), registry.permissions):
         registry.register(skill)
     registry.register(HelpSkill(registry.metadata))
+    registry.register(WorkspaceSkill(registry.metadata))
     configurations = SkillConfigurationRepository(database)
     registry.attach_enablement_store(configurations)
     router = CommandRouter(registry)
