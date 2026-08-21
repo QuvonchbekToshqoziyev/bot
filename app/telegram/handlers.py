@@ -14,9 +14,11 @@ from app.core.local_tasks import LocalTaskRouter
 from app.ai.orchestrator import AIOrchestrator
 from app.storage.repositories import AIConfigurationRepository
 from app.storage.repositories import SkillConfigurationRepository
+from app.storage.repositories import ManagedChatRepository
+from app.storage.repositories import MessageRepository
 
 
-def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None):
+def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None, managed_chats: ManagedChatRepository | None = None, messages: MessageRepository | None = None):
     local_tasks = LocalTaskRouter(registry)
     def menu() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -37,10 +39,20 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("Chat info", callback_data="manage:info"), InlineKeyboardButton("Member count", callback_data="manage:members")],
             [InlineKeyboardButton("Administrators", callback_data="manage:admins")],
+            [InlineKeyboardButton("Get messages", callback_data="manage:messages"), InlineKeyboardButton("Search", callback_data="manage:search")],
             [InlineKeyboardButton("Send message", callback_data="manage:send"), InlineKeyboardButton("Delete message", callback_data="manage:delete")],
             [InlineKeyboardButton("Pin message", callback_data="manage:pin")],
+            [InlineKeyboardButton("Backup to chat", callback_data="manage:backup"), InlineKeyboardButton("Schedule post", callback_data="manage:schedule")],
             [InlineKeyboardButton("Change target", callback_data="manage:target"), InlineKeyboardButton("Back", callback_data="menu:back")],
         ])
+
+    def managed_chat_markup(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        items = managed_chats.list(user_id) if managed_chats else []
+        text = "Managed chats:\n" + ("\n".join(f"• {item['title'] or item['target_id']} ({item['target_id']})" for item in items) if items else "No chats connected yet.")
+        buttons = [[InlineKeyboardButton(item["title"] or item["target_id"], callback_data=f"target:{item['target_id']}")] for item in items]
+        buttons.append([InlineKeyboardButton("Add channel/group", callback_data="target:add")])
+        buttons.append([InlineKeyboardButton("Back", callback_data="menu:back")])
+        return text, InlineKeyboardMarkup(buttons)
 
     def parse_target(value: str) -> int | str:
         value = value.strip()
@@ -174,7 +186,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             target = context.user_data.get("management_target")
             if target is None:
                 context.user_data["awaiting_management_target"] = True
-                await query.edit_message_text("Send the target channel/group ID (for example -1001234567890) or its public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+                text, markup = managed_chat_markup(query.from_user.id)
+                await query.edit_message_text(text + "\n\nSend a new target ID or tap Add channel/group.", reply_markup=markup)
             else:
                 await query.edit_message_text(f"Managing target: {target}", reply_markup=management_markup(target))
         elif action == "menu:ai":
@@ -207,8 +220,18 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             except (KeyError, PermissionDenied, PermissionError) as exc:
                 await query.edit_message_text(str(exc), reply_markup=menu())
         elif action == "manage:target":
+            context.user_data.pop("management_target", None)
+            text, markup = managed_chat_markup(query.from_user.id)
+            await query.edit_message_text(text, reply_markup=markup)
+        elif action == "target:add":
             context.user_data["awaiting_management_target"] = True
-            await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+            await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:management")]]))
+        elif action.startswith("target:"):
+            target = parse_target(action.removeprefix("target:"))
+            context.user_data["management_target"] = target
+            if managed_chats:
+                await asyncio.to_thread(managed_chats.add, query.from_user.id, target)
+            await query.edit_message_text(f"Managing target: {target}", reply_markup=management_markup(target))
         elif action.startswith("manage:"):
             target = context.user_data.get("management_target")
             if target is None:
@@ -216,12 +239,20 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
                 return
             operation = action.removeprefix("manage:")
-            if operation in {"send", "delete", "pin"}:
+            skill_for_operation = {"messages": "messages", "search": "search", "backup": "backup", "schedule": "scheduler"}.get(operation)
+            if skill_for_operation and not await ensure_skill(query.from_user.id, query.message.chat_id, skill_for_operation):
+                await query.edit_message_text(f"{skill_for_operation} is not authorized in this chat.", reply_markup=management_markup(target))
+                return
+            if operation in {"send", "delete", "pin", "search", "backup", "schedule"}:
                 context.user_data["awaiting_management_action"] = operation
-                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin."}[operation]
+                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin.", "search": "Send the search text.", "backup": "Send the destination chat ID, for example -1001234567890.", "schedule": "Send: delay_seconds | post text. Example: 3600 | Good morning"}[operation]
                 await query.edit_message_text(f"Target: {target}\n{prompt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:management")]]))
                 return
             tool_name = {"info": "get_chat_info", "members": "get_member_count", "admins": "list_administrators"}.get(operation)
+            if operation == "messages":
+                result = await registry.execute(query.from_user.id, query.message.chat_id, "messages", "list_messages", {"target_id": str(target)})
+                await query.edit_message_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
+                return
             if tool_name is None:
                 return
             try:
@@ -237,6 +268,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             try:
                 target = parse_target(update.effective_message.text)
                 context.user_data["management_target"] = target
+                if managed_chats:
+                    await asyncio.to_thread(managed_chats.add, update.effective_user.id, target)
                 await update.effective_message.reply_text(f"Managing target: {target}", reply_markup=management_markup(target))
             except ValueError as exc:
                 await update.effective_message.reply_text(str(exc))
@@ -249,10 +282,20 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                     raise ValueError("Choose a management target first.")
                 if management_action == "send":
                     result = await registry.execute(update.effective_user.id, update.effective_chat.id, "management", "send_message", {"chat_id": target, "text": update.effective_message.text})
-                else:
+                elif management_action in {"delete", "pin"}:
                     message_id = int(update.effective_message.text.strip())
                     tool_name = "delete_message" if management_action == "delete" else "pin_message"
                     result = await registry.execute(update.effective_user.id, update.effective_chat.id, "management", tool_name, {"chat_id": target, "message_id": message_id})
+                elif management_action == "search":
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "search", "search_messages", {"target_id": str(target), "query": update.effective_message.text})
+                elif management_action == "backup":
+                    destination = parse_target(update.effective_message.text)
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "backup", "copy_messages", {"source_id": str(target), "destination_id": str(destination), "limit": 20})
+                else:
+                    delay_text, separator, post_text = update.effective_message.text.partition("|")
+                    if not separator:
+                        raise ValueError("Use: delay_seconds | post text")
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "scheduler", "schedule_post", {"target_id": str(target), "text": post_text.strip(), "delay_seconds": int(delay_text.strip())})
                 await update.effective_message.reply_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
             except (ValueError, PermissionDenied, PermissionError, TelegramError) as exc:
                 await update.effective_message.reply_text(f"Management failed: {exc}", reply_markup=management_markup(target) if target is not None else menu())
@@ -270,4 +313,15 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         buttons = [[InlineKeyboardButton("Use AI for this task", callback_data="ai:run")], [InlineKeyboardButton("Back", callback_data="menu:back")]]
         await update.effective_message.reply_text("No local skill matches that task.", reply_markup=InlineKeyboardMarkup(buttons))
 
-    return start, help_command, skills, skill_command, status, ask, ai_command, callback, turn
+    async def index_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if messages is None or managed_chats is None:
+            return
+        message = update.channel_post or update.message
+        if message is None or not message.text:
+            return
+        owners = await asyncio.to_thread(managed_chats.owners_for, message.chat.id)
+        sender_id = message.from_user.id if message.from_user else None
+        for owner_id in owners:
+            await asyncio.to_thread(messages.add, owner_id, message.chat.id, message.message_id, message.text, sender_id)
+
+    return start, help_command, skills, skill_command, status, ask, ai_command, callback, turn, index_update

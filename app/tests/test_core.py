@@ -14,7 +14,7 @@ from app.skills.management import ManagementSkill
 from app.skills.workspace import WorkspaceSkill
 from app.skills.statistics import StatisticsSkill
 from app.storage.database import Database
-from app.storage.repositories import AuthorizationRepository, LibraryRepository, SkillConfigurationRepository, WorkspaceRepository
+from app.storage.repositories import AuthorizationRepository, LibraryRepository, ManagedChatRepository, MessageRepository, ScheduledPostRepository, SkillConfigurationRepository, WorkspaceRepository
 from app.ai.orchestrator import AIOrchestrator
 
 
@@ -226,3 +226,28 @@ def test_workspace_skill_reports_enabled_skills():
     result = asyncio.run(registry.execute(1, 2, "workspace", "get_overview", {}))
     assert result["status"] == "online"
     assert "workspace" in result["enabled_skills"]
+
+
+def test_managed_chats_persist_and_switch_targets():
+    db = Database("sqlite:///:memory:")
+    chats = ManagedChatRepository(db)
+    chats.add(1, "@news", "News")
+    chats.add(1, -100123, "Group")
+    assert {item["target_id"] for item in chats.list(1)} == {"@news", "-100123"}
+    chats.remove(1, "@news")
+    assert [item["target_id"] for item in chats.list(1)] == ["-100123"]
+
+
+def test_message_search_and_scheduled_post_persistence():
+    db = Database("sqlite:///:memory:")
+    messages = MessageRepository(db)
+    messages.add(1, "-100123", 5, "hello world")
+    assert messages.search(1, "-100123", "world")[0]["message_id"] == 5
+    scheduled = ScheduledPostRepository(db)
+    post_id = scheduled.create(1, "-100123", "later", 10)
+    assert scheduled.due(10)[0]["id"] == post_id
+    scheduled.mark(post_id, "sent")
+    assert scheduled.list(1)[0]["status"] == "sent"
+    other_post = scheduled.create(2, "-100123", "private", 10)
+    scheduled.mark(other_post, "cancelled", 1)
+    assert scheduled.list(2)[0]["status"] == "pending"

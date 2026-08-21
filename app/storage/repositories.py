@@ -93,6 +93,89 @@ class AIConfigurationRepository:
         return bool(row and row[0])
 
 
+class ManagedChatRepository:
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def add(self, user_id: int, target_id: int | str, title: str | None = None, chat_type: str | None = None) -> None:
+        with self.db.lock:
+            self.db.connection.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES (?)", (user_id,))
+            self.db.connection.execute("INSERT INTO managed_chats(user_id, target_id, title, chat_type) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, target_id) DO UPDATE SET title=COALESCE(excluded.title, managed_chats.title), chat_type=COALESCE(excluded.chat_type, managed_chats.chat_type)", (user_id, str(target_id), title, chat_type))
+            self.db.connection.commit()
+
+    def remove(self, user_id: int, target_id: int | str) -> None:
+        with self.db.lock:
+            self.db.connection.execute("DELETE FROM managed_chats WHERE user_id=? AND target_id=?", (user_id, str(target_id)))
+            self.db.connection.commit()
+
+    def list(self, user_id: int) -> list[dict[str, Any]]:
+        with self.db.lock:
+            rows = self.db.connection.execute("SELECT target_id, title, chat_type, added_at FROM managed_chats WHERE user_id=? ORDER BY added_at, target_id", (user_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def owners_for(self, target_id: int | str) -> list[int]:
+        with self.db.lock:
+            rows = self.db.connection.execute("SELECT user_id FROM managed_chats WHERE target_id=?", (str(target_id),)).fetchall()
+        return [row[0] for row in rows]
+
+
+class MessageRepository:
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def add(self, owner_id: int, target_id: int | str, message_id: int, text: str, sender_id: int | None = None) -> None:
+        with self.db.lock:
+            self.db.connection.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES (?)", (owner_id,))
+            self.db.connection.execute("INSERT OR IGNORE INTO managed_messages(owner_id, target_id, message_id, sender_id, text) VALUES (?, ?, ?, ?, ?)", (owner_id, str(target_id), message_id, sender_id, text))
+            self.db.connection.commit()
+
+    def list(self, owner_id: int, target_id: int | str, limit: int = 20) -> list[dict[str, Any]]:
+        with self.db.lock:
+            rows = self.db.connection.execute("SELECT message_id, sender_id, text, created_at FROM managed_messages WHERE owner_id=? AND target_id=? ORDER BY created_at DESC LIMIT ?", (owner_id, str(target_id), limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def search(self, owner_id: int, target_id: int | str, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self.db.lock:
+            rows = self.db.connection.execute("SELECT message_id, sender_id, text, created_at FROM managed_messages WHERE owner_id=? AND target_id=? AND text LIKE ? ORDER BY created_at DESC LIMIT ?", (owner_id, str(target_id), f"%{query}%", limit)).fetchall()
+        return [dict(row) for row in rows]
+
+
+class ScheduledPostRepository:
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def create(self, user_id: int, target_id: int | str, text: str, run_at: int) -> int:
+        with self.db.lock:
+            self.db.connection.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES (?)", (user_id,))
+            cursor = self.db.connection.execute("INSERT INTO scheduled_posts(user_id, target_id, text, run_at) VALUES (?, ?, ?, ?)", (user_id, str(target_id), text, run_at))
+            self.db.connection.commit()
+        return int(cursor.lastrowid)
+
+    def list(self, user_id: int, target_id: int | str | None = None) -> list[dict[str, Any]]:
+        with self.db.lock:
+            if target_id is None:
+                rows = self.db.connection.execute("SELECT id, target_id, text, run_at, status FROM scheduled_posts WHERE user_id=? ORDER BY run_at", (user_id,)).fetchall()
+            else:
+                rows = self.db.connection.execute("SELECT id, target_id, text, run_at, status FROM scheduled_posts WHERE user_id=? AND target_id=? ORDER BY run_at", (user_id, str(target_id))).fetchall()
+        return [dict(row) for row in rows]
+
+    def due(self, now: int) -> list[dict[str, Any]]:
+        with self.db.lock:
+            rows = self.db.connection.execute("SELECT id, user_id, target_id, text FROM scheduled_posts WHERE status='pending' AND run_at<=? ORDER BY run_at", (now,)).fetchall()
+            for row in rows:
+                self.db.connection.execute("UPDATE scheduled_posts SET status='sending' WHERE id=?", (row[0],))
+            self.db.connection.commit()
+        return [dict(row) for row in rows]
+
+    def mark(self, post_id: int, status: str, user_id: int | None = None) -> None:
+        with self.db.lock:
+            if user_id is None:
+                self.db.connection.execute("UPDATE scheduled_posts SET status=? WHERE id=?", (status, post_id))
+            else:
+                self.db.connection.execute("UPDATE scheduled_posts SET status=? WHERE id=? AND user_id=?", (status, post_id, user_id))
+            self.db.connection.commit()
+
+
 class LibraryRepository:
     def __init__(self, database: Database) -> None:
         self.db = database

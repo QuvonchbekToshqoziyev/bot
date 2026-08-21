@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram import Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
 from app.core.config import Settings
 from app.core.logging import configure_logging
@@ -14,9 +15,10 @@ from app.skills.catalog import discover_skills
 from app.skills.help import HelpSkill
 from app.skills.workspace import WorkspaceSkill
 from app.storage.database import Database
-from app.storage.repositories import AIConfigurationRepository, AuthorizationRepository, LibraryRepository, SkillConfigurationRepository
+from app.storage.repositories import AIConfigurationRepository, AuthorizationRepository, LibraryRepository, ManagedChatRepository, MessageRepository, ScheduledPostRepository, SkillConfigurationRepository
 from app.telegram.handlers import build_handlers
 from app.telegram.management_adapter import TelegramManagementAdapter
+from app.telegram.scheduler import run_scheduler
 
 
 def create_application(settings: Settings) -> Application:
@@ -25,7 +27,10 @@ def create_application(settings: Settings) -> Application:
     authorization = AuthorizationRepository(database)
     registry = SkillRegistry(PermissionService(authorization.permissions_for, settings.admin_user_ids))
     library_repository = LibraryRepository(database)
-    for skill in discover_skills(library_repository, TelegramManagementAdapter(application.bot), registry.permissions):
+    management_adapter = TelegramManagementAdapter(application.bot)
+    message_repository = MessageRepository(database)
+    scheduled_posts = ScheduledPostRepository(database)
+    for skill in discover_skills(library_repository, management_adapter, registry.permissions, message_repository, scheduled_posts):
         registry.register(skill)
     registry.register(HelpSkill(registry.metadata))
     registry.register(WorkspaceSkill(registry.metadata))
@@ -41,7 +46,8 @@ def create_application(settings: Settings) -> Application:
         else:
             ai = AIOrchestrator(registry, AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url), settings.openai_model, max_output_tokens=settings.ai_max_output_tokens)
     ai_configuration = AIConfigurationRepository(database)
-    start, help_command, skills, skill_command, status, ask, ai_command, callback, turn = build_handlers(router, registry, ai, ai_configuration, configurations)
+    managed_chats = ManagedChatRepository(database)
+    start, help_command, skills, skill_command, status, ask, ai_command, callback, turn, index_update = build_handlers(router, registry, ai, ai_configuration, configurations, managed_chats, message_repository)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("skills", skills))
@@ -51,6 +57,12 @@ def create_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CallbackQueryHandler(callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, turn))
+    application.add_handler(TypeHandler(Update, index_update), group=1)
+
+    async def post_init(app: Application) -> None:
+        app.create_task(run_scheduler(scheduled_posts, management_adapter.send_message), name="scheduled-post-runner")
+
+    application.post_init = post_init
     return application
 
 

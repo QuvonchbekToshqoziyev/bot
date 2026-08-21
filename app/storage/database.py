@@ -30,6 +30,14 @@ class Database:
             chat_id INTEGER PRIMARY KEY REFERENCES chats(telegram_id),
             enabled INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS managed_chats (
+            user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+            target_id TEXT NOT NULL,
+            title TEXT,
+            chat_type TEXT,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, target_id)
+        );
         CREATE TABLE IF NOT EXISTS skill_configurations (
             user_id INTEGER NOT NULL REFERENCES users(telegram_id),
             chat_id INTEGER NOT NULL REFERENCES chats(telegram_id),
@@ -45,6 +53,24 @@ class Database:
             telegram_message_id INTEGER NOT NULL,
             text TEXT NOT NULL,
             UNIQUE (chat_id, telegram_message_id)
+        );
+        CREATE TABLE IF NOT EXISTS managed_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id INTEGER NOT NULL REFERENCES users(telegram_id),
+            target_id TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            sender_id INTEGER,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (owner_id, target_id, message_id)
+        );
+        CREATE TABLE IF NOT EXISTS scheduled_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+            target_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            run_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
         );
         """)
         self.connection.commit()
