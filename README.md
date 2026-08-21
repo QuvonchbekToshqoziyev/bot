@@ -20,4 +20,6 @@ The `management` skill provides chat info, member counts, administrator listing,
 
 Connected target chats are stored in SQLite and can be switched from the Manage chat menu. The menu also provides indexed message listing/search, indexed-message backup to another chat, and scheduled text posts. Indexing starts when the bot receives messages after a target is connected; Telegram bots cannot download arbitrary historical chat history.
 
+The `moderation` skill is opt-in per managed target. From Manage chat, configure moderation, link filtering, keyword filtering, welcome/farewell messages, and rules with buttons. The bot must be an administrator with permission to delete and send messages. Moderation settings are stored in SQLite and disabled by default.
+
 The Telegram dependency is limited to the adapter. Core, storage, and skills are usable and testable without Telegram credentials.

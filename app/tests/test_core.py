@@ -14,7 +14,7 @@ from app.skills.management import ManagementSkill
 from app.skills.workspace import WorkspaceSkill
 from app.skills.statistics import StatisticsSkill
 from app.storage.database import Database
-from app.storage.repositories import AuthorizationRepository, LibraryRepository, ManagedChatRepository, MessageRepository, ScheduledPostRepository, SkillConfigurationRepository, WorkspaceRepository
+from app.storage.repositories import AuthorizationRepository, LibraryRepository, ManagedChatRepository, MessageRepository, ModerationRepository, ScheduledPostRepository, SkillConfigurationRepository, WorkspaceRepository
 from app.ai.orchestrator import AIOrchestrator
 
 
@@ -251,3 +251,13 @@ def test_message_search_and_scheduled_post_persistence():
     other_post = scheduled.create(2, "-100123", "private", 10)
     scheduled.mark(other_post, "cancelled", 1)
     assert scheduled.list(2)[0]["status"] == "pending"
+
+
+def test_moderation_settings_are_scoped_and_merged():
+    db = Database("sqlite:///:memory:")
+    moderation = ModerationRepository(db)
+    moderation.update(1, "-1001", {"enabled": True, "keywords": ["spam"]})
+    moderation.update(2, "-1001", {"link_filter": True})
+    assert moderation.get(1, "-1001")["enabled"] is True
+    assert moderation.get(1, "-1001")["link_filter"] is False
+    assert moderation.get(2, "-1001")["link_filter"] is True

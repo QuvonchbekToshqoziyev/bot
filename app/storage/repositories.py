@@ -119,6 +119,40 @@ class ManagedChatRepository:
         return [row[0] for row in rows]
 
 
+class ModerationRepository:
+    defaults = {
+        "enabled": False,
+        "link_filter": False,
+        "keyword_filter": False,
+        "keywords": [],
+        "welcome": False,
+        "farewell": False,
+        "welcome_text": "Welcome, {name}!",
+        "farewell_text": "{name} left the chat.",
+        "rules": "",
+    }
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def get(self, user_id: int, target_id: int | str) -> dict[str, Any]:
+        with self.db.lock:
+            row = self.db.connection.execute("SELECT config_json FROM moderation_settings WHERE user_id=? AND target_id=?", (user_id, str(target_id))).fetchone()
+        config = dict(self.defaults)
+        if row:
+            config.update(json.loads(row[0]))
+        return config
+
+    def update(self, user_id: int, target_id: int | str, values: dict[str, Any]) -> dict[str, Any]:
+        config = self.get(user_id, target_id)
+        config.update(values)
+        with self.db.lock:
+            self.db.connection.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES (?)", (user_id,))
+            self.db.connection.execute("INSERT INTO moderation_settings(user_id, target_id, config_json) VALUES (?, ?, ?) ON CONFLICT(user_id, target_id) DO UPDATE SET config_json=excluded.config_json", (user_id, str(target_id), json.dumps(config)))
+            self.db.connection.commit()
+        return config
+
+
 class MessageRepository:
     def __init__(self, database: Database) -> None:
         self.db = database

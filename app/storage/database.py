@@ -72,6 +72,12 @@ class Database:
             run_at INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending'
         );
+        CREATE TABLE IF NOT EXISTS moderation_settings (
+            user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+            target_id TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (user_id, target_id)
+        );
         """)
         self.connection.commit()
 

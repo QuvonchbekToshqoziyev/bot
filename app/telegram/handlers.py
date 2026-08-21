@@ -18,7 +18,7 @@ from app.storage.repositories import ManagedChatRepository
 from app.storage.repositories import MessageRepository
 
 
-def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None, managed_chats: ManagedChatRepository | None = None, messages: MessageRepository | None = None):
+def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None, managed_chats: ManagedChatRepository | None = None, messages: MessageRepository | None = None, moderation=None):
     local_tasks = LocalTaskRouter(registry)
     def menu() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -44,7 +44,17 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             [InlineKeyboardButton("Pin message", callback_data="manage:pin")],
             [InlineKeyboardButton("Backup to chat", callback_data="manage:backup"), InlineKeyboardButton("Schedule post", callback_data="manage:schedule")],
             [InlineKeyboardButton("Scheduled posts", callback_data="manage:scheduled"), InlineKeyboardButton("Cancel scheduled", callback_data="manage:cancel_schedule")],
+            [InlineKeyboardButton("Moderation", callback_data="manage:moderation"), InlineKeyboardButton("Rules", callback_data="manage:rules")],
             [InlineKeyboardButton("Change target", callback_data="manage:target"), InlineKeyboardButton("Back", callback_data="menu:back")],
+        ])
+
+    def moderation_markup(settings: dict[str, object]) -> InlineKeyboardMarkup:
+        state = lambda key: "ON" if settings.get(key) else "OFF"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Moderation: {state('enabled')}", callback_data="moderation:enabled"), InlineKeyboardButton(f"Links: {state('link_filter')}", callback_data="moderation:link_filter")],
+            [InlineKeyboardButton(f"Keywords: {state('keyword_filter')}", callback_data="moderation:keyword_filter")],
+            [InlineKeyboardButton(f"Welcome: {state('welcome')}", callback_data="moderation:welcome"), InlineKeyboardButton(f"Farewell: {state('farewell')}", callback_data="moderation:farewell")],
+            [InlineKeyboardButton("Set keywords", callback_data="manage:keywords"), InlineKeyboardButton("Back", callback_data="menu:management")],
         ])
 
     def managed_chat_markup(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -233,6 +243,15 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             if managed_chats:
                 await asyncio.to_thread(managed_chats.add, query.from_user.id, target)
             await query.edit_message_text(f"Managing target: {target}", reply_markup=management_markup(target))
+        elif action.startswith("moderation:"):
+            target = context.user_data.get("management_target")
+            if target is None or not await ensure_skill(query.from_user.id, query.message.chat_id, "moderation"):
+                await query.edit_message_text("Moderation is not authorized for this chat.", reply_markup=menu())
+                return
+            field = action.removeprefix("moderation:")
+            settings = await registry.execute(query.from_user.id, query.message.chat_id, "moderation", "get_settings", {"target_id": str(target)})
+            settings = await registry.execute(query.from_user.id, query.message.chat_id, "moderation", "update_settings", {"target_id": str(target), field: not bool(settings.get(field))})
+            await query.edit_message_text(json.dumps(settings, indent=2), reply_markup=moderation_markup(settings))
         elif action.startswith("manage:"):
             target = context.user_data.get("management_target")
             if target is None:
@@ -240,7 +259,7 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
                 return
             operation = action.removeprefix("manage:")
-            skill_for_operation = {"messages": "messages", "search": "search", "backup": "backup", "schedule": "scheduler", "scheduled": "scheduler", "cancel_schedule": "scheduler"}.get(operation)
+            skill_for_operation = {"messages": "messages", "search": "search", "backup": "backup", "schedule": "scheduler", "scheduled": "scheduler", "cancel_schedule": "scheduler", "moderation": "moderation", "rules": "moderation", "keywords": "moderation"}.get(operation)
             if skill_for_operation and not await ensure_skill(query.from_user.id, query.message.chat_id, skill_for_operation):
                 await query.edit_message_text(f"{skill_for_operation} is not authorized in this chat.", reply_markup=management_markup(target))
                 return
@@ -248,9 +267,13 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 result = await registry.execute(query.from_user.id, query.message.chat_id, "scheduler", "list_scheduled_posts", {"target_id": str(target)})
                 await query.edit_message_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
                 return
-            if operation in {"send", "delete", "pin", "search", "backup", "schedule", "cancel_schedule"}:
+            if operation == "moderation":
+                settings = await registry.execute(query.from_user.id, query.message.chat_id, "moderation", "get_settings", {"target_id": str(target)})
+                await query.edit_message_text(json.dumps(settings, indent=2), reply_markup=moderation_markup(settings))
+                return
+            if operation in {"send", "delete", "pin", "search", "backup", "schedule", "cancel_schedule", "rules", "keywords"}:
                 context.user_data["awaiting_management_action"] = operation
-                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin.", "search": "Send the search text.", "backup": "Send the destination chat ID, for example -1001234567890.", "schedule": "Send: delay_seconds | post text. Example: 3600 | Good morning", "cancel_schedule": "Send the scheduled post ID."}[operation]
+                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin.", "search": "Send the search text.", "backup": "Send the destination chat ID, for example -1001234567890.", "schedule": "Send: delay_seconds | post text. Example: 3600 | Good morning", "cancel_schedule": "Send the scheduled post ID.", "rules": "Send the rules text.", "keywords": "Send comma-separated blocked keywords."}[operation]
                 await query.edit_message_text(f"Target: {target}\n{prompt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:management")]]))
                 return
             tool_name = {"info": "get_chat_info", "members": "get_member_count", "admins": "list_administrators"}.get(operation)
@@ -298,6 +321,11 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                     result = await registry.execute(update.effective_user.id, update.effective_chat.id, "backup", "copy_messages", {"source_id": str(target), "destination_id": str(destination), "limit": 20})
                 elif management_action == "cancel_schedule":
                     result = await registry.execute(update.effective_user.id, update.effective_chat.id, "scheduler", "cancel_scheduled_post", {"id": int(update.effective_message.text.strip())})
+                elif management_action == "rules":
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "moderation", "set_rules", {"target_id": str(target), "text": update.effective_message.text})
+                elif management_action == "keywords":
+                    keywords = [item.strip() for item in update.effective_message.text.split(",") if item.strip()]
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "moderation", "update_settings", {"target_id": str(target), "keywords": keywords, "keyword_filter": bool(keywords)})
                 else:
                     delay_text, separator, post_text = update.effective_message.text.partition("|")
                     if not separator:
@@ -321,6 +349,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         await update.effective_message.reply_text("No local skill matches that task.", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def index_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if moderation is not None:
+            await moderation.handle_update(update)
         if messages is None or managed_chats is None:
             return
         message = update.channel_post or update.message
