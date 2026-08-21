@@ -10,15 +10,18 @@ from telegram.ext import ContextTypes
 from app.core.permissions import Permission, PermissionDenied
 from app.core.router import CommandRouter
 from app.core.skill_registry import SkillRegistry
+from app.core.local_tasks import LocalTaskRouter
 from app.ai.orchestrator import AIOrchestrator
 from app.storage.repositories import AIConfigurationRepository
 from app.storage.repositories import SkillConfigurationRepository
 
 
 def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchestrator | None = None, ai_configuration: AIConfigurationRepository | None = None, configurations: SkillConfigurationRepository | None = None):
+    local_tasks = LocalTaskRouter(registry)
     def menu() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("What can you do?", callback_data="menu:capabilities"), InlineKeyboardButton("Skills", callback_data="menu:skills")],
+            [InlineKeyboardButton("Local task", callback_data="menu:local")],
             [InlineKeyboardButton("Ask a question/task", callback_data="menu:ask"), InlineKeyboardButton("Manage chat", callback_data="menu:management")],
             [InlineKeyboardButton("AI settings", callback_data="menu:ai")],
         ])
@@ -83,15 +86,19 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         await update.effective_message.reply_text(f"Enabled skills: {', '.join(skill.name for skill in enabled) or 'none'}")
 
     async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if ai is None:
-            await update.effective_message.reply_text("AI is not configured. Set OPENAI_API_KEY and install the ai extra.")
-            return
         task = " ".join(context.args).strip()
-        if ai_configuration is None or not ai_configuration.is_enabled(update.effective_chat.id):
-            await update.effective_message.reply_text("AI is disabled. An administrator can use /ai enable.")
-            return
         if not task:
             await update.effective_message.reply_text("Usage: /ask <task>")
+            return
+        local = await local_tasks.handle(update.effective_user.id, update.effective_chat.id, task)
+        if local.handled:
+            await update.effective_message.reply_text(local.message, reply_markup=menu())
+            return
+        if ai is None:
+            await update.effective_message.reply_text("No local skill matches that task. AI is not configured.", reply_markup=menu())
+            return
+        if ai_configuration is None or not ai_configuration.is_enabled(update.effective_chat.id):
+            await update.effective_message.reply_text("No local skill matches that task. AI is disabled.", reply_markup=menu())
             return
         result = await ai.handle_task(update.effective_user.id, update.effective_chat.id, task)
         await update.effective_message.reply_text(result.message)
@@ -133,6 +140,9 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         elif action == "menu:ask":
             context.user_data["awaiting_task"] = True
             await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
+        elif action == "menu:local":
+            context.user_data["awaiting_task"] = True
+            await query.edit_message_text("Send a local task such as ‘statistics’, ‘list skills’, or ‘what can you do?’. No AI will be used.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
         elif action == "menu:management":
             try:
                 await asyncio.to_thread(router.enable, query.from_user.id, query.message.chat_id, "management")
@@ -159,6 +169,13 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await query.edit_message_text(f"AI {'enabled' if enabled else 'disabled'}.", reply_markup=menu())
             except PermissionDenied as exc:
                 await query.edit_message_text(str(exc), reply_markup=menu())
+        elif action == "ai:run":
+            task = context.user_data.pop("pending_task", None)
+            if not task or ai is None or ai_configuration is None or not ai_configuration.is_enabled(query.message.chat_id):
+                await query.edit_message_text("AI is disabled or there is no pending task.", reply_markup=menu())
+                return
+            result = await ai.handle_task(query.from_user.id, query.message.chat_id, task)
+            await query.edit_message_text(result.message, reply_markup=menu())
         elif action.startswith("skill:"):
             _, operation, skill_name = action.split(":", 2)
             try:
@@ -223,10 +240,12 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 result = await registry.execute(update.effective_user.id, update.effective_chat.id, "help", "answer_question", {"question": update.effective_message.text})
                 await update.effective_message.reply_text(result["answer"], reply_markup=menu())
             return
-        if ai is None or ai_configuration is None or not ai_configuration.is_enabled(update.effective_chat.id):
-            await update.effective_message.reply_text("AI is disabled. Use the AI settings button first.", reply_markup=menu())
+        local = await local_tasks.handle(update.effective_user.id, update.effective_chat.id, update.effective_message.text)
+        if local.handled:
+            await update.effective_message.reply_text(local.message, reply_markup=menu())
             return
-        result = await ai.handle_task(update.effective_user.id, update.effective_chat.id, update.effective_message.text)
-        await update.effective_message.reply_text(result.message, reply_markup=menu())
+        context.user_data["pending_task"] = update.effective_message.text
+        buttons = [[InlineKeyboardButton("Use AI for this task", callback_data="ai:run")], [InlineKeyboardButton("Back", callback_data="menu:back")]]
+        await update.effective_message.reply_text("No local skill matches that task.", reply_markup=InlineKeyboardMarkup(buttons))
 
     return start, help_command, skills, skill_command, status, ask, ai_command, callback, turn

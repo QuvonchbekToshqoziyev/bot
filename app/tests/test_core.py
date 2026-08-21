@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from app.core.models import Chat, User
+from app.core.local_tasks import LocalTaskRouter
 from app.core.permissions import PermissionDenied, PermissionService
 from app.core.router import CommandRouter
 from app.core.skill_registry import SkillRegistry
@@ -206,3 +207,12 @@ def test_ai_falls_back_to_safe_basic_tool_when_provider_is_unavailable():
     result = asyncio.run(AIOrchestrator(registry, FailingClient()).handle_task(1, 2, "statistics"))
     assert result.status == "completed"
     assert '"indexed_messages": 0' in result.message
+
+
+def test_local_task_router_handles_statistics_without_ai():
+    _, _, _, registry = make_registry(frozenset({1}))
+    registry.enable(1, 2, "statistics")
+    result = asyncio.run(LocalTaskRouter(registry).handle(1, 2, "show statistics"))
+    assert result.handled is True
+    assert result.skill == "statistics"
+    assert "indexed_messages" in result.message
