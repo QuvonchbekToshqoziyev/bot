@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import CallbackQueryHandler
 from telegram.ext import ContextTypes
 
@@ -27,6 +29,23 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         buttons = [[InlineKeyboardButton(("Disable " if item["enabled"] else "Enable ") + item["name"], callback_data=f"skill:{'disable' if item['enabled'] else 'enable'}:{item['name']}" )] for item in items]
         buttons.append([InlineKeyboardButton("Back", callback_data="menu:back")])
         return text, InlineKeyboardMarkup(buttons)
+
+    def management_markup(target: int | str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("Chat info", callback_data="manage:info"), InlineKeyboardButton("Member count", callback_data="manage:members")],
+            [InlineKeyboardButton("Administrators", callback_data="manage:admins")],
+            [InlineKeyboardButton("Send message", callback_data="manage:send"), InlineKeyboardButton("Delete message", callback_data="manage:delete")],
+            [InlineKeyboardButton("Pin message", callback_data="manage:pin")],
+            [InlineKeyboardButton("Change target", callback_data="manage:target"), InlineKeyboardButton("Back", callback_data="menu:back")],
+        ])
+
+    def parse_target(value: str) -> int | str:
+        value = value.strip()
+        if value.startswith("@") and len(value) > 1:
+            return value
+        if value.lstrip("-").isdigit():
+            return int(value)
+        raise ValueError("Send a numeric chat ID such as -1001234567890 or @channelusername.")
 
     async def ensure_help(user_id: int, chat_id: int) -> None:
         if configurations is not None:
@@ -101,6 +120,9 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
         await ensure_help(query.from_user.id, query.message.chat_id)
         action = query.data or "menu:back"
         if action == "menu:back":
+            context.user_data.pop("awaiting_task", None)
+            context.user_data.pop("awaiting_management_target", None)
+            context.user_data.pop("awaiting_management_action", None)
             await query.edit_message_text("Choose an option:", reply_markup=menu())
         elif action == "menu:capabilities":
             result = await registry.execute(query.from_user.id, query.message.chat_id, "help", "answer_question", {"question": "What can you do?"})
@@ -112,7 +134,12 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             context.user_data["awaiting_task"] = True
             await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
         elif action == "menu:management":
-            await query.edit_message_text("I can inspect chats, list administrators, send, delete, and pin messages. Add me as a Telegram administrator in the target group or channel, then choose Ask a question/task and describe what you want.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Ask a task", callback_data="menu:ask"), InlineKeyboardButton("Back", callback_data="menu:back")]]))
+            target = context.user_data.get("management_target")
+            if target is None:
+                context.user_data["awaiting_management_target"] = True
+                await query.edit_message_text("Send the target channel/group ID (for example -1001234567890) or its public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+            else:
+                await query.edit_message_text(f"Managing target: {target}", reply_markup=management_markup(target))
         elif action == "menu:ai":
             enabled = ai is not None and ai_configuration is not None and ai_configuration.is_enabled(query.message.chat_id)
             await query.edit_message_text(f"AI is {'enabled' if enabled else 'disabled'}.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Enable", callback_data="ai:enable"), InlineKeyboardButton("Disable", callback_data="ai:disable")], [InlineKeyboardButton("Back", callback_data="menu:back")]]))
@@ -135,9 +162,57 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await query.edit_message_text(text, reply_markup=markup)
             except (KeyError, PermissionDenied, PermissionError) as exc:
                 await query.edit_message_text(str(exc), reply_markup=menu())
+        elif action == "manage:target":
+            context.user_data["awaiting_management_target"] = True
+            await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+        elif action.startswith("manage:"):
+            target = context.user_data.get("management_target")
+            if target is None:
+                context.user_data["awaiting_management_target"] = True
+                await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+                return
+            operation = action.removeprefix("manage:")
+            if operation in {"send", "delete", "pin"}:
+                context.user_data["awaiting_management_action"] = operation
+                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin."}[operation]
+                await query.edit_message_text(f"Target: {target}\n{prompt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:management")]]))
+                return
+            tool_name = {"info": "get_chat_info", "members": "get_member_count", "admins": "list_administrators"}.get(operation)
+            if tool_name is None:
+                return
+            try:
+                result = await registry.execute(query.from_user.id, query.message.chat_id, "management", tool_name, {"chat_id": target})
+                await query.edit_message_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
+            except (PermissionDenied, PermissionError, ValueError, TelegramError) as exc:
+                await query.edit_message_text(f"Management failed: {exc}", reply_markup=management_markup(target))
 
     async def turn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await ensure_help(update.effective_user.id, update.effective_chat.id)
+        if context.user_data.get("awaiting_management_target"):
+            context.user_data.pop("awaiting_management_target")
+            try:
+                target = parse_target(update.effective_message.text)
+                context.user_data["management_target"] = target
+                await update.effective_message.reply_text(f"Managing target: {target}", reply_markup=management_markup(target))
+            except ValueError as exc:
+                await update.effective_message.reply_text(str(exc))
+            return
+        management_action = context.user_data.pop("awaiting_management_action", None)
+        if management_action:
+            target = context.user_data.get("management_target")
+            try:
+                if target is None:
+                    raise ValueError("Choose a management target first.")
+                if management_action == "send":
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "management", "send_message", {"chat_id": target, "text": update.effective_message.text})
+                else:
+                    message_id = int(update.effective_message.text.strip())
+                    tool_name = "delete_message" if management_action == "delete" else "pin_message"
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "management", tool_name, {"chat_id": target, "message_id": message_id})
+                await update.effective_message.reply_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
+            except (ValueError, PermissionDenied, PermissionError, TelegramError) as exc:
+                await update.effective_message.reply_text(f"Management failed: {exc}", reply_markup=management_markup(target) if target is not None else menu())
+            return
         if not context.user_data.pop("awaiting_task", False):
             if update.effective_chat.type == "private":
                 result = await registry.execute(update.effective_user.id, update.effective_chat.id, "help", "answer_question", {"question": update.effective_message.text})
