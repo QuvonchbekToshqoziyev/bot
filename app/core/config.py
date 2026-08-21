@@ -20,6 +20,7 @@ class Settings:
     database_url: str
     admin_user_ids: frozenset[int]
     openai_api_key: str | None = None
+    openai_base_url: str | None = None
     openai_model: str = "gpt-5"
     log_level: str = "INFO"
 
@@ -32,4 +33,5 @@ class Settings:
         ids = frozenset(int(value.strip()) for value in os.getenv("ADMIN_USER_IDS", "").split(",") if value.strip())
         if not ids:
             raise ValueError("ADMIN_USER_IDS must contain at least one numeric Telegram user ID")
-        return cls(token, os.getenv("DATABASE_URL", "sqlite:///workspace.db"), ids, os.getenv("OPENAI_API_KEY") or None, os.getenv("OPENAI_MODEL", "gpt-5"), os.getenv("LOG_LEVEL", "INFO"))
+        router_key = os.getenv("OPENROUTER_API_KEY") or None
+        return cls(token, os.getenv("DATABASE_URL", "sqlite:///workspace.db"), ids, os.getenv("OPENAI_API_KEY") or router_key, os.getenv("OPENAI_BASE_URL") or ("https://openrouter.ai/api/v1" if router_key else None), os.getenv("OPENAI_MODEL", "gpt-5"), os.getenv("LOG_LEVEL", "INFO"))

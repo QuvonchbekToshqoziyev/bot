@@ -33,7 +33,7 @@ def create_application(settings: Settings) -> Application:
         except ImportError:
             logging.getLogger(__name__).warning("OPENAI_API_KEY is set but the optional OpenAI dependency is not installed")
         else:
-            ai = AIOrchestrator(registry, AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model)
+            ai = AIOrchestrator(registry, AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url), settings.openai_model)
     ai_configuration = AIConfigurationRepository(database)
     start, help_command, skills, skill_command, status, ask, ai_command = build_handlers(router, registry, ai, ai_configuration)
     application = Application.builder().token(settings.telegram_bot_token).build()
