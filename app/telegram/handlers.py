@@ -43,6 +43,7 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             [InlineKeyboardButton("Send message", callback_data="manage:send"), InlineKeyboardButton("Delete message", callback_data="manage:delete")],
             [InlineKeyboardButton("Pin message", callback_data="manage:pin")],
             [InlineKeyboardButton("Backup to chat", callback_data="manage:backup"), InlineKeyboardButton("Schedule post", callback_data="manage:schedule")],
+            [InlineKeyboardButton("Scheduled posts", callback_data="manage:scheduled"), InlineKeyboardButton("Cancel scheduled", callback_data="manage:cancel_schedule")],
             [InlineKeyboardButton("Change target", callback_data="manage:target"), InlineKeyboardButton("Back", callback_data="menu:back")],
         ])
 
@@ -239,13 +240,17 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await query.edit_message_text("Send the target channel/group ID or public @username.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
                 return
             operation = action.removeprefix("manage:")
-            skill_for_operation = {"messages": "messages", "search": "search", "backup": "backup", "schedule": "scheduler"}.get(operation)
+            skill_for_operation = {"messages": "messages", "search": "search", "backup": "backup", "schedule": "scheduler", "scheduled": "scheduler", "cancel_schedule": "scheduler"}.get(operation)
             if skill_for_operation and not await ensure_skill(query.from_user.id, query.message.chat_id, skill_for_operation):
                 await query.edit_message_text(f"{skill_for_operation} is not authorized in this chat.", reply_markup=management_markup(target))
                 return
-            if operation in {"send", "delete", "pin", "search", "backup", "schedule"}:
+            if operation == "scheduled":
+                result = await registry.execute(query.from_user.id, query.message.chat_id, "scheduler", "list_scheduled_posts", {"target_id": str(target)})
+                await query.edit_message_text(json.dumps(result, indent=2, default=str)[:3900], reply_markup=management_markup(target))
+                return
+            if operation in {"send", "delete", "pin", "search", "backup", "schedule", "cancel_schedule"}:
                 context.user_data["awaiting_management_action"] = operation
-                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin.", "search": "Send the search text.", "backup": "Send the destination chat ID, for example -1001234567890.", "schedule": "Send: delay_seconds | post text. Example: 3600 | Good morning"}[operation]
+                prompt = {"send": "Send the message text.", "delete": "Send the message ID to delete.", "pin": "Send the message ID to pin.", "search": "Send the search text.", "backup": "Send the destination chat ID, for example -1001234567890.", "schedule": "Send: delay_seconds | post text. Example: 3600 | Good morning", "cancel_schedule": "Send the scheduled post ID."}[operation]
                 await query.edit_message_text(f"Target: {target}\n{prompt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:management")]]))
                 return
             tool_name = {"info": "get_chat_info", "members": "get_member_count", "admins": "list_administrators"}.get(operation)
@@ -291,6 +296,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 elif management_action == "backup":
                     destination = parse_target(update.effective_message.text)
                     result = await registry.execute(update.effective_user.id, update.effective_chat.id, "backup", "copy_messages", {"source_id": str(target), "destination_id": str(destination), "limit": 20})
+                elif management_action == "cancel_schedule":
+                    result = await registry.execute(update.effective_user.id, update.effective_chat.id, "scheduler", "cancel_scheduled_post", {"id": int(update.effective_message.text.strip())})
                 else:
                     delay_text, separator, post_text = update.effective_message.text.partition("|")
                     if not separator:
