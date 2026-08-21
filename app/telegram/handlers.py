@@ -134,6 +134,11 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             context.user_data["awaiting_task"] = True
             await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
         elif action == "menu:management":
+            try:
+                await asyncio.to_thread(router.enable, query.from_user.id, query.message.chat_id, "management")
+            except (PermissionDenied, PermissionError) as exc:
+                await query.edit_message_text(f"Management is not authorized in this chat: {exc}", reply_markup=menu())
+                return
             target = context.user_data.get("management_target")
             if target is None:
                 context.user_data["awaiting_management_target"] = True
