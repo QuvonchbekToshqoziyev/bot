@@ -21,6 +21,13 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             [InlineKeyboardButton("AI settings", callback_data="menu:ai")],
         ])
 
+    def skills_markup(user_id: int, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        items = registry.metadata(user_id, chat_id)
+        text = "Skills in this chat:\n" + "\n".join(f"• {item['name']}: {'enabled' if item['enabled'] else 'disabled'}" for item in items)
+        buttons = [[InlineKeyboardButton(("Disable " if item["enabled"] else "Enable ") + item["name"], callback_data=f"skill:{'disable' if item['enabled'] else 'enable'}:{item['name']}" )] for item in items]
+        buttons.append([InlineKeyboardButton("Back", callback_data="menu:back")])
+        return text, InlineKeyboardMarkup(buttons)
+
     async def ensure_help(user_id: int, chat_id: int) -> None:
         if configurations is not None:
             await asyncio.to_thread(configurations.set_enabled, user_id, chat_id, "help", True)
@@ -38,8 +45,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
 
     async def skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id, chat_id = update.effective_user.id, update.effective_chat.id
-        lines = [f"{item['name']}: {'enabled' if item['enabled'] else 'disabled'}" for item in registry.metadata(user_id, chat_id)]
-        await update.effective_message.reply_text("\n".join(lines) or "No skills registered.")
+        text, markup = skills_markup(user_id, chat_id)
+        await update.effective_message.reply_text(text, reply_markup=markup)
 
     async def skill_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id, chat_id = update.effective_user.id, update.effective_chat.id
@@ -99,9 +106,8 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
             result = await registry.execute(query.from_user.id, query.message.chat_id, "help", "answer_question", {"question": "What can you do?"})
             await query.edit_message_text(result["answer"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
         elif action == "menu:skills":
-            items = registry.metadata(query.from_user.id, query.message.chat_id)
-            text = "Skills in this chat:\n" + "\n".join(f"• {item['name']}: {'enabled' if item['enabled'] else 'disabled'}" for item in items)
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu:back")]]))
+            text, markup = skills_markup(query.from_user.id, query.message.chat_id)
+            await query.edit_message_text(text, reply_markup=markup)
         elif action == "menu:ask":
             context.user_data["awaiting_task"] = True
             await query.edit_message_text("Send your question or task as the next message.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:back")]]))
@@ -120,6 +126,14 @@ def build_handlers(router: CommandRouter, registry: SkillRegistry, ai: AIOrchest
                 await asyncio.to_thread(ai_configuration.set_enabled, query.message.chat_id, enabled)
                 await query.edit_message_text(f"AI {'enabled' if enabled else 'disabled'}.", reply_markup=menu())
             except PermissionDenied as exc:
+                await query.edit_message_text(str(exc), reply_markup=menu())
+        elif action.startswith("skill:"):
+            _, operation, skill_name = action.split(":", 2)
+            try:
+                await asyncio.to_thread((router.enable if operation == "enable" else router.disable), query.from_user.id, query.message.chat_id, skill_name)
+                text, markup = skills_markup(query.from_user.id, query.message.chat_id)
+                await query.edit_message_text(text, reply_markup=markup)
+            except (KeyError, PermissionDenied, PermissionError) as exc:
                 await query.edit_message_text(str(exc), reply_markup=menu())
 
     async def turn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
