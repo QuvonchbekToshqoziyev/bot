@@ -77,6 +77,22 @@ class SkillConfigurationRepository:
         return [(row[0], row[1], row[2]) for row in rows]
 
 
+class AIConfigurationRepository:
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def set_enabled(self, chat_id: int, enabled: bool) -> None:
+        with self.db.lock:
+            self.db.connection.execute("INSERT OR IGNORE INTO chats(telegram_id) VALUES (?)", (chat_id,))
+            self.db.connection.execute("INSERT INTO ai_configurations VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled", (chat_id, int(enabled)))
+            self.db.connection.commit()
+
+    def is_enabled(self, chat_id: int) -> bool:
+        with self.db.lock:
+            row = self.db.connection.execute("SELECT enabled FROM ai_configurations WHERE chat_id=?", (chat_id,)).fetchone()
+        return bool(row and row[0])
+
+
 class LibraryRepository:
     def __init__(self, database: Database) -> None:
         self.db = database

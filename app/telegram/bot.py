@@ -12,7 +12,7 @@ from app.core.skill_registry import SkillRegistry
 from app.ai.orchestrator import AIOrchestrator
 from app.skills.catalog import discover_skills
 from app.storage.database import Database
-from app.storage.repositories import AuthorizationRepository, LibraryRepository, SkillConfigurationRepository
+from app.storage.repositories import AIConfigurationRepository, AuthorizationRepository, LibraryRepository, SkillConfigurationRepository
 from app.telegram.handlers import build_handlers
 
 
@@ -34,7 +34,8 @@ def create_application(settings: Settings) -> Application:
             logging.getLogger(__name__).warning("OPENAI_API_KEY is set but the optional OpenAI dependency is not installed")
         else:
             ai = AIOrchestrator(registry, AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model)
-    start, help_command, skills, skill_command, status, ask = build_handlers(router, registry, ai)
+    ai_configuration = AIConfigurationRepository(database)
+    start, help_command, skills, skill_command, status, ask, ai_command = build_handlers(router, registry, ai, ai_configuration)
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -42,6 +43,7 @@ def create_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("skill", skill_command))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("ask", ask))
+    application.add_handler(CommandHandler("ai", ai_command))
     return application
 
 

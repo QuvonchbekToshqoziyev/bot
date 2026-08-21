@@ -26,6 +26,10 @@ class Database:
             role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
             PRIMARY KEY (user_id, chat_id)
         );
+        CREATE TABLE IF NOT EXISTS ai_configurations (
+            chat_id INTEGER PRIMARY KEY REFERENCES chats(telegram_id),
+            enabled INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS skill_configurations (
             user_id INTEGER NOT NULL REFERENCES users(telegram_id),
             chat_id INTEGER NOT NULL REFERENCES chats(telegram_id),
