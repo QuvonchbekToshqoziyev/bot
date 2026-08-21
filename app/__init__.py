@@ -1,0 +1,2 @@
+"""Telegram Workspace Manager application."""
+
